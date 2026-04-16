@@ -1,6 +1,6 @@
 # 📬 jlc自动签到脚本
 
-使用此 Python 脚本可以自动为多个jlc账号完成每日签到任务，并通过 [Server 酱](https://sct.ftqq.com/)推送签到结果至微信。
+使用此 Python 脚本可以自动为多个jlc账号完成每日签到任务，并通过 [Bark](https://github.com/Finb/Bark) 推送签到结果至 Apple 设备。
 
 ## ✨ 项目功能
 
@@ -8,7 +8,7 @@
 * 🎁 自动判断是否为**第七天签到**并领取8个金豆
 * 💰 获取并显示当前账号金豆数量
 * 📊 将账号按通知 `SendKey` 分组，分组推送签到结果
-* 📲 使用 **Server 酱** 实时推送签到通知到微信
+* 📲 使用 **Bark** 实时推送签到通知
 
 ## 🔧 使用前准备
 
@@ -21,11 +21,11 @@
 5. 多个账号用英文逗号 `,` 分隔
 6. 建议使用手机抓包，请勿手动退出账号，否则会导致token失效
 
-### 2️⃣ 获取 SendKey（Server 酱）
+### 2️⃣ 获取 SendKey（Bark）
 
-1. 打开 [Server 酱官网](https://sct.ftqq.com/)
-2. 注册并登录后，进入「发送通道」页面
-3. 创建通知通道并获取 `SendKey`
+1. 在 App Store 中搜索并下载 **Bark** 应用
+2. 打开应用后，获取默认服务器地址后面的 Key（例如 `https://api.day.app/your_key`，则 `SendKey` 取 `your_key`）
+3. 也可以直接填入完整的推送链接（如自己部署的Bark：`https://你的域名/your_key`）
 4. 多个账号用英文逗号 `,` 分隔，**数量需与 TOKEN\_LIST 一一对应**
 
 ## ⚙️ 配置说明
@@ -63,7 +63,7 @@ name: JLC Auto Sign
 
 on:
   schedule:
-    - cron: '0 4 * * *'
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
