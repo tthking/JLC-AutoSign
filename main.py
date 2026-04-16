@@ -37,14 +37,19 @@ def mask_json_customer_code(data):
         return data
 
 # ======== 推送通知 ========
-def send_msg_by_server(send_key, title, content):
-    push_url = f'https://sctapi.ftqq.com/{send_key}.send'
+def send_msg_by_bark(send_key, title, content):
+    # 支持自定义 Bark 服务器地址，如果 send_key 是完整的 URL，则直接使用，否则默认使用 api.day.app
+    if send_key.startswith('http'):
+        push_url = f'{send_key}'
+    else:
+        push_url = f'https://api.day.app/{send_key}'
+    
     data = {
-        'text': title,
-        'desp': content
+        'title': title,
+        'body': content
     }
     try:
-        response = requests.post(push_url, data=data)
+        response = requests.post(push_url, json=data)
         return response.json()
     except RequestException:
         return None
@@ -185,10 +190,10 @@ def main():
             content = "\n\n".join(results)
             print(f"📤 检测到有金豆获取，准备发送通知给 SendKey: {send_key[:5]}...")
             
-            response = send_msg_by_server(send_key, "嘉立创签到汇总", content)
+            response = send_msg_by_bark(send_key, "嘉立创签到汇总", content)
             
-            if response and response.get('code') == 0:
-                print(f"✅ 通知发送成功！消息ID: {response.get('data', {}).get('pushid', '')}")
+            if response and response.get('code') == 200:
+                print(f"✅ 通知发送成功！")
                 notification_sent = True
             else:
                 error_msg = response.get('message') if response else '未知错误'

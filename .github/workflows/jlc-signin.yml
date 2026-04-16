@@ -2,7 +2,7 @@ name: JLC Auto Sign
 
 on:
   schedule:
-    - cron: '0 4 * * *'
+    - cron: '0 0 * * *' # UTC 00:00, corresponding to 8:00 AM Beijing Time
 
   workflow_dispatch:
 
