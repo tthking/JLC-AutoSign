@@ -5,7 +5,7 @@
 ## ✨ 项目功能
 
 * ✅ 自动签到获取每日金豆（支持多账号与网络异常自动重试）
-* 🎁 自动判断是否为**第七天签到**并领取额外金豆奖励
+* 🎁 **第 7 天按优先级自动选领**：默认优先领取 **纸盒券 → FPC 券 → 8 金豆兜底**（自动识别本月上限 `isCanExchange`，遇到券列表异常/改名/领券失败自动兜底金豆并推送告警详情）
 * 🔍 精确识别 Token 失效（HTTP 401/未登录），触发 **Bark 失效告警** 并以非零状态码退出（避免 GitHub Actions 静默假成功）
 * 📊 支持将多个账号按 `SendKey` 分组推送，也支持只填 **1 个** `SendKey` 接收全部账号汇总
 * ⏱️ 内置月度保活工作流（`keepalive.yml`），防止公开仓库因 60 天无提交导致 GitHub Actions 定时任务被自动停用
@@ -37,10 +37,11 @@
 1. 进入仓库 **Settings → Secrets and variables → Actions**
 2. 添加或更新以下 Secrets：
 
-| 变量名          | 示例值        | 说明                                               |
-| --------------- | ------------- | -------------------------------------------------- |
-| `TOKEN_LIST`    | `token1,token2` | 多个 token 用英文逗号分隔                          |
-| `SEND_KEY_LIST` | `key1,key2`   | 与 token 一一对应，或只填 1 个 key 供全部账号共用  |
+| 变量名                 | 示例值          | 说明                                                               |
+| ---------------------- | --------------- | ------------------------------------------------------------------ |
+| `TOKEN_LIST`           | `token1,token2` | 多个 token 用英文逗号分隔                                          |
+| `SEND_KEY_LIST`        | `key1,key2`     | 与 token 一一对应，或只填 1 个 key 供全部账号共用                  |
+| `SEVENTH_DAY_PRIORITY` | `纸盒,FPC,金豆` | （可选）第 7 天领取顺序，未设置时默认 `纸盒,FPC,金豆`              |
 
 3. 确认仓库 **Settings → Actions → General → Workflow permissions** 允许工作流写入（或已配置 `permissions: contents: write`），以便月度保活工作流自动维持定时任务激活状态。
 4. 如需清理旧运行记录，可在仓库 **Actions → Cleanup Old Workflow Runs** 中确认工作流处于启用（Enable）状态。

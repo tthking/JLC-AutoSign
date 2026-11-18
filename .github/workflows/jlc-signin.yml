@@ -13,6 +13,11 @@ on:
         required: false
         default: false
         type: boolean
+      preview_coupons:
+        description: '只读预览第7天可选优惠券列表（不执行领奖）'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   sign:
@@ -40,6 +45,8 @@ jobs:
       env:
         TOKEN_LIST: ${{ secrets.TOKEN_LIST }}
         SEND_KEY_LIST: ${{ secrets.SEND_KEY_LIST }}
+        SEVENTH_DAY_PRIORITY: ${{ secrets.SEVENTH_DAY_PRIORITY || '纸盒,FPC,金豆' }}
         NOTIFY_ALWAYS: ${{ inputs.notify_always || 'false' }}
+        PREVIEW_COUPONS: ${{ inputs.preview_coupons || 'false' }}
       run: |
         python main.py

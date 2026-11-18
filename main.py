@@ -11,11 +11,15 @@ from requests.exceptions import RequestException
 TOKEN_LIST = os.getenv('TOKEN_LIST', '')
 SEND_KEY_LIST = os.getenv('SEND_KEY_LIST', '')
 NOTIFY_ALWAYS = os.getenv('NOTIFY_ALWAYS', 'false').strip().lower() in ('1', 'true', 'yes')
+PREVIEW_COUPONS = os.getenv('PREVIEW_COUPONS', 'false').strip().lower() in ('1', 'true', 'yes')
+SEVENTH_DAY_PRIORITY = os.getenv('SEVENTH_DAY_PRIORITY', '纸盒,FPC,金豆')
 
 # 接口配置
 SIGN_URL = 'https://m.jlc.com/api/activity/sign/signIn?source=3'
 GOLD_BEAN_URL = 'https://m.jlc.com/api/appPlatform/center/assets/selectPersonalAssetsInfo'
 SIGN_CONFIG_URL = 'https://m.jlc.com/api/activity/sign/getCurrentUserSignInConfig'
+COUPON_LIST_URL = 'https://m.jlc.com/api/activity/sign/selectCouponList'
+RECEIVE_COUPON_URL = 'https://m.jlc.com/api/activity/sign/receiveCoupon'
 SEVENTH_DAY_URL = 'https://m.jlc.com/api/activity/sign/receiveVoucher'
 
 REQUEST_TIMEOUT = 15
@@ -91,6 +95,25 @@ def parse_config_pairs(token_raw, send_key_raw):
     return tokens, send_keys, pairs
 
 
+def parse_priority_list(raw):
+    """解析第7天领奖优先级配置，并确保始终保留金豆作为最终兜底"""
+    items = [part.strip() for part in str(raw or '').split(',') if part.strip()]
+    if not items:
+        return ['纸盒', 'FPC', '金豆']
+
+    seen = set()
+    ordered = []
+    for item in items:
+        key = '金豆' if item in ('金豆', 'BEAN', 'bean') else item
+        if key.upper() not in seen:
+            seen.add(key.upper())
+            ordered.append(key)
+
+    if '金豆' not in ordered:
+        ordered.append('金豆')
+    return ordered
+
+
 # ======== 推送通知 ========
 def send_msg_by_bark(send_key, title, content, retries=2, backoff=3):
     """发送 Bark 推送通知（含瞬态网络/5xx 重试），支持自定义完整 URL 或默认 api.day.app Key"""
@@ -116,14 +139,14 @@ def send_msg_by_bark(send_key, title, content, retries=2, backoff=3):
             print(f"⚠️ Bark 推送第 {attempt}/{retries} 次失败: {e}")
             if attempt < retries and backoff > 0:
                 time.sleep(backoff * attempt)
-    print("❌ Bark 推送多次重试后仍失败")
+    print('❌ Bark 推送多次重试后仍失败')
     return None
 
 
 # ======== HTTP 请求辅助 ========
-def request_json(session, target_url, headers):
+def request_json(session, target_url, headers, params=None):
     """发送 GET 请求并解析 JSON，统一识别 HTTP 401/403 与非 JSON 响应"""
-    response = session.get(target_url, headers=headers, timeout=REQUEST_TIMEOUT)
+    response = session.get(target_url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
     if response.status_code in (401, 403):
         raise TokenExpiredError(f'HTTP {response.status_code}，AccessToken 已失效或未登录')
     response.raise_for_status()
@@ -139,22 +162,241 @@ def request_json(session, target_url, headers):
     return payload
 
 
-def _claim_seventh_day(session, headers, account_label, integral_voucher):
-    """领取第七天签到额外奖励"""
-    seventh_result = request_json(session, SEVENTH_DAY_URL, headers)
-    if _is_api_success(seventh_result):
-        seventh_data = seventh_result.get('data') or {}
-        bonus = int(seventh_data.get('gainNum') or 8)
-        print(f"🎉 [账号{account_label}] 第七天签到成功，获取 {bonus} 个金豆")
-        return 'gained', f'🎉 账号({account_label})：第七天签到成功，获取{bonus}个金豆，当前总数：{integral_voucher + bonus}'
+# ======== 第7天优惠券与金豆逻辑 ========
+def _extract_coupon_info(item):
+    """标准化 selectCouponList 返回的单个优惠券对象"""
+    if not isinstance(item, dict):
+        return None
+    dto = item.get('hubCustomerCouponRespDTO')
+    if not isinstance(dto, dict):
+        dto = {}
 
-    msg = seventh_result.get('message') or '第七天奖励领取失败'
-    print(f"❌ [账号{account_label}] 第七天奖励领取失败 - {msg}")
-    return 'failed', f'❌ 账号({account_label})：第七天奖励领取失败 - {msg}'
+    remainder_raw = item.get('remainderInventory')
+    try:
+        remainder = int(remainder_raw) if remainder_raw is not None else None
+    except (TypeError, ValueError):
+        remainder = None
+
+    return {
+        'id': item.get('id'),
+        'title': str(item.get('goodsTitle') or '').strip(),
+        'name': str(dto.get('name') or '').strip(),
+        'business_line': str(dto.get('businessLine') or '').strip().upper(),
+        'can_exchange': item.get('isCanExchange'),
+        'remainder': remainder,
+        'cycle_limit_unit': item.get('cycleLimitUnit'),
+        'cycle_limit': item.get('cycleLimit'),
+    }
+
+
+def _is_coupon_claimable(info):
+    """判断优惠券当前是否可领（isCanExchange 为 True 且有库存）"""
+    if not info or info.get('id') is None:
+        return False
+    if info.get('can_exchange') is not True:
+        return False
+    remainder = info.get('remainder')
+    if remainder is not None and remainder <= 0:
+        return False
+    return True
+
+
+def _matches_coupon_keyword(info, keyword):
+    """按业务线编码或名称关键字匹配目标优惠券"""
+    kw = keyword.strip().upper()
+    title_upper = info['title'].upper()
+    name_upper = info['name'].upper()
+    biz = info['business_line']
+
+    if kw in ('纸盒', 'BOX'):
+        return biz == 'BOX' or '纸盒' in title_upper or '纸盒' in name_upper
+    if kw == 'FPC':
+        return biz == 'FPC' or 'FPC' in title_upper or 'FPC' in name_upper
+    return biz == kw or kw in title_upper or kw in name_upper
+
+
+def _format_coupon_summary(coupons):
+    """生成用于日志和 Bark 告警的可选券简要清单"""
+    parts = []
+    for c in coupons:
+        label = c['title'] or c['name'] or '未命名券'
+        biz = c['business_line'] or '-'
+        state = '可领' if _is_coupon_claimable(c) else ('已兑完' if c['remainder'] == 0 else '已上限/不可领')
+        parts.append(f"{label}[id={c['id']},biz={biz},{state}]")
+    return '；'.join(parts) if parts else '空列表'
+
+
+def _fetch_coupon_list(session, headers):
+    """查询第7天可选优惠券列表，返回 (coupons, error_message)"""
+    try:
+        res = request_json(session, COUPON_LIST_URL, headers)
+    except TokenExpiredError:
+        raise
+    except (RequestException, ApiResponseError) as e:
+        return None, f'查询券列表请求失败: {e}'
+
+    if not _is_api_success(res):
+        return None, f"查询券列表接口返回失败: {res.get('message') or res.get('code')}"
+
+    raw_list = res.get('data')
+    if not isinstance(raw_list, list):
+        return None, f'查询券列表返回非列表结构: {type(raw_list).__name__}'
+
+    coupons = [info for info in (_extract_coupon_info(item) for item in raw_list) if info is not None]
+    if not coupons:
+        return [], '券列表为空'
+    return coupons, None
+
+
+def _claim_coupon(session, headers, coupon_info):
+    """调用 receiveCoupon 领取指定优惠券，返回 (ok, error_message)"""
+    coupon_id = coupon_info['id']
+    for terminal in ('APP', 'WEB'):
+        try:
+            res = request_json(
+                session,
+                RECEIVE_COUPON_URL,
+                headers,
+                params={'couponId': coupon_id, 'terminal': terminal},
+            )
+        except TokenExpiredError:
+            raise
+        except (RequestException, ApiResponseError) as e:
+            return False, str(e)
+
+        if _is_api_success(res):
+            return True, ''
+
+        msg = str(res.get('message') or f"code={res.get('code')}")
+        if _is_auth_error_message(msg, res.get('code')):
+            raise TokenExpiredError(msg)
+        # 若因 terminal 参数不兼容导致失败，自动尝试另一端参数
+        if terminal == 'APP' and any(k in msg.lower() for k in ('terminal', '终端', '参数')):
+            continue
+        return False, msg
+
+    return False, '领券接口拒绝了请求参数'
+
+
+def _claim_voucher_beans(session, headers, account_label, integral_voucher, reason_note='', warnings=None):
+    """调用 receiveVoucher 领取第7天金豆，并在触发告警时保留诊断信息"""
+    warnings = list(warnings or [])
+    last_err = ''
+    for params in (None, {'platformType': 'WEB'}):
+        try:
+            res = request_json(session, SEVENTH_DAY_URL, headers, params=params)
+        except TokenExpiredError:
+            raise
+        except (RequestException, ApiResponseError) as e:
+            last_err = str(e)
+            break
+
+        if _is_api_success(res):
+            seventh_data = res.get('data') or {}
+            bonus = int(seventh_data.get('gainNum') or 8)
+            note_part = f'（{reason_note}）' if reason_note else ''
+            print(f"🎉 [账号{account_label}] 第七天签到成功{note_part}，获取 {bonus} 个金豆")
+            msg = f'🎉 账号({account_label})：第七天签到成功{note_part}，获取{bonus}个金豆，当前总数：{integral_voucher + bonus}'
+            if warnings:
+                msg += '\n⚠️ 第7天诊断信息：' + '；'.join(warnings)
+            return 'gained', msg, warnings
+
+        last_err = str(res.get('message') or f"code={res.get('code')}")
+        if _is_auth_error_message(last_err, res.get('code')):
+            raise TokenExpiredError(last_err)
+        if params is None and any(k in last_err.lower() for k in ('platform', '平台', '参数')):
+            continue
+        break
+
+    err_msg = last_err or '第七天奖励领取失败'
+    print(f"❌ [账号{account_label}] 第七天奖励领取失败 - {err_msg}")
+    warnings.append(f'领取8金豆失败: {err_msg}')
+    return 'failed', f"❌ 账号({account_label})：第七天奖励领取失败 - {'；'.join(warnings)}", warnings
+
+
+def _claim_seventh_day(session, headers, account_label, integral_voucher):
+    """按优先级顺序领取第7天奖励（默认：纸盒券 -> FPC券 -> 8金豆兜底），并记录异常告警"""
+    priorities = parse_priority_list(SEVENTH_DAY_PRIORITY)
+    coupon_targets = [p for p in priorities if p != '金豆']
+    warnings = []
+
+    if not coupon_targets:
+        return _claim_voucher_beans(session, headers, account_label, integral_voucher)
+
+    coupons, fetch_err = _fetch_coupon_list(session, headers)
+    if fetch_err:
+        print(f"⚠️ [账号{account_label}] {fetch_err}，将自动兜底领取金豆")
+        warnings.append(f'{fetch_err}，已自动兜底领取金豆')
+        return _claim_voucher_beans(
+            session, headers, account_label, integral_voucher,
+            reason_note='券列表查询异常，兜底金豆', warnings=warnings
+        )
+
+    print(f"🎫 [账号{account_label}] 第7天可选优惠券: {_format_coupon_summary(coupons)}")
+
+    matched_any_target = False
+    exhausted_targets = []
+
+    for keyword in coupon_targets:
+        matched = [c for c in coupons if _matches_coupon_keyword(c, keyword)]
+        if not matched:
+            print(f"⚠️ [账号{account_label}] 可选券列表中未匹配到目标【{keyword}】")
+            continue
+
+        matched_any_target = True
+        claimable = [c for c in matched if _is_coupon_claimable(c)]
+        if not claimable:
+            print(f"ℹ️ [账号{account_label}] 目标【{keyword}】本月已达上限或已兑完，跳过")
+            exhausted_targets.append(keyword)
+            continue
+
+        if len(claimable) > 1:
+            warnings.append(f'目标【{keyword}】匹配到多张可领券({_format_coupon_summary(claimable)})，已优先选取第一张')
+
+        chosen = claimable[0]
+        coupon_label = chosen['title'] or chosen['name'] or keyword
+        ok, claim_err = _claim_coupon(session, headers, chosen)
+        if ok:
+            print(f"🎉 [账号{account_label}] 第七天签到成功，已领取优惠券：{coupon_label} (id={chosen['id']})")
+            msg = f"🎉 账号({account_label})：第七天签到成功，已领取【{coupon_label}】（当前金豆：{integral_voucher}）"
+            if warnings:
+                msg += '\n⚠️ 第7天诊断信息：' + '；'.join(warnings)
+            return 'gained', msg, warnings
+
+        print(f"⚠️ [账号{account_label}] 领取【{coupon_label}】失败: {claim_err}")
+        warnings.append(f"领取【{coupon_label}】(id={chosen['id']})失败: {claim_err}")
+
+    if not matched_any_target:
+        summary = _format_coupon_summary(coupons)
+        warnings.append(f"未在列表中匹配到任何目标券({','.join(coupon_targets)})，可能官方改名；当前列表：{summary}")
+        reason = '未匹配到目标券，兜底金豆'
+    elif exhausted_targets and not warnings:
+        reason = f"{'/'.join(exhausted_targets)}券本月已达上限或已兑完"
+    else:
+        reason = '目标券领取失败，兜底金豆'
+
+    return _claim_voucher_beans(
+        session, headers, account_label, integral_voucher,
+        reason_note=reason, warnings=warnings
+    )
+
+
+def _attach_coupon_preview(session, headers, account_label, summary_msg, warnings):
+    """调试模式：只读查询当前第7天可选券列表并附加到通知与日志"""
+    coupons, fetch_err = _fetch_coupon_list(session, headers)
+    if fetch_err:
+        warn = f'预览第7天券列表失败: {fetch_err}'
+        print(f"⚠️ [账号{account_label}] {warn}")
+        warnings.append(warn)
+        return f'{summary_msg}\n⚠️ {warn}'
+
+    summary = _format_coupon_summary(coupons)
+    print(f"🔍 [账号{account_label}] 第7天券列表预览: {summary}")
+    return f'{summary_msg}\n🎫 第7天券列表预览：{summary}'
 
 
 def _sign_in_once(session, access_token):
-    """执行单次账号校验与签到流程，返回 (status_kind, summary_message)"""
+    """执行单次账号校验与签到流程，返回 (status_kind, summary_message, warnings)"""
     headers = {
         'X-JLC-AccessToken': access_token,
         'X-JLC-ClientType': 'APP',
@@ -163,6 +405,7 @@ def _sign_in_once(session, access_token):
             'AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Html5Plus/1.0 (Immersed/20) JlcMobileApp'
         ),
     }
+    warnings = []
 
     # 1. 查询资产与 Token 有效性（同时获取 customerCode 和当前金豆数）
     bean_result = request_json(session, GOLD_BEAN_URL, headers)
@@ -177,6 +420,12 @@ def _sign_in_once(session, access_token):
     integral_voucher = int(bean_data.get('integralVoucher') or 0)
     account_label = mask_account(customer_code or access_token)
 
+    def finalize(kind, msg, extra_warnings=None):
+        all_warnings = list(warnings) + list(extra_warnings or [])
+        if PREVIEW_COUPONS:
+            msg = _attach_coupon_preview(session, headers, account_label, msg, all_warnings)
+        return kind, msg, all_warnings
+
     # 2. 预检当日签到状态（如遇非鉴权异常则降级直接请求签到接口）
     try:
         config_result = request_json(session, SIGN_CONFIG_URL, headers)
@@ -184,9 +433,10 @@ def _sign_in_once(session, access_token):
         if _is_api_success(config_result) and isinstance(config_data, dict):
             if config_data.get('haveSignIn'):
                 if config_data.get('haveReceive') is False:
-                    return _claim_seventh_day(session, headers, account_label, integral_voucher)
+                    kind, msg, w = _claim_seventh_day(session, headers, account_label, integral_voucher)
+                    return finalize(kind, msg, w)
                 print(f"ℹ️ [账号{account_label}] 今日已签到，当前金豆：{integral_voucher}")
-                return 'already_signed', f'ℹ️ 账号({account_label})：今日已签到，当前金豆：{integral_voucher}'
+                return finalize('already_signed', f'ℹ️ 账号({account_label})：今日已签到，当前金豆：{integral_voucher}')
     except TokenExpiredError:
         raise
     except (RequestException, ApiResponseError) as e:
@@ -198,11 +448,11 @@ def _sign_in_once(session, access_token):
         message = str(sign_result.get('message') or '未知错误')
         if '已经签到' in message or '已签到' in message:
             print(f"ℹ️ [账号{account_label}] 今日已签到，当前金豆：{integral_voucher}")
-            return 'already_signed', f'ℹ️ 账号({account_label})：今日已签到，当前金豆：{integral_voucher}'
+            return finalize('already_signed', f'ℹ️ 账号({account_label})：今日已签到，当前金豆：{integral_voucher}')
         if _is_auth_error_message(message, sign_result.get('code')):
             raise TokenExpiredError(message)
         print(f"❌ [账号{account_label}] 签到失败 - {message}")
-        return 'failed', f'❌ 账号({account_label})：签到失败 - {message}'
+        return finalize('failed', f'❌ 账号({account_label})：签到失败 - {message}')
 
     data = sign_result.get('data') or {}
     gain_num = data.get('gainNum')
@@ -211,18 +461,19 @@ def _sign_in_once(session, access_token):
     # status: 0=失败, 1=成功, 2=今日已签到
     if status == 2:
         print(f"ℹ️ [账号{account_label}] 今日已签到，当前金豆：{integral_voucher}")
-        return 'already_signed', f'ℹ️ 账号({account_label})：今日已签到，当前金豆：{integral_voucher}'
+        return finalize('already_signed', f'ℹ️ 账号({account_label})：今日已签到，当前金豆：{integral_voucher}')
 
     if status == 1:
         if gain_num is not None and int(gain_num) > 0:
             beans = int(gain_num)
             print(f"✅ [账号{account_label}] 今日签到成功，获取 {beans} 个金豆")
-            return 'gained', f'✅ 账号({account_label})：获取{beans}个金豆，当前总数：{integral_voucher + beans}'
-        return _claim_seventh_day(session, headers, account_label, integral_voucher)
+            return finalize('gained', f'✅ 账号({account_label})：获取{beans}个金豆，当前总数：{integral_voucher + beans}')
+        kind, msg, w = _claim_seventh_day(session, headers, account_label, integral_voucher)
+        return finalize(kind, msg, w)
 
     msg = sign_result.get('message') or f'签到返回异常状态 status={status}'
     print(f"❌ [账号{account_label}] {msg}")
-    return 'failed', f'❌ 账号({account_label})：{msg}'
+    return finalize('failed', f'❌ 账号({account_label})：{msg}')
 
 
 # ======== 单个账号签到逻辑 ========
@@ -235,7 +486,7 @@ def sign_in(access_token, retries=DEFAULT_RETRIES, backoff=DEFAULT_BACKOFF):
                 return _sign_in_once(session, access_token)
             except TokenExpiredError as e:
                 print(f"❌ [账号{token_label}] Token 已失效: {e}")
-                return 'failed', f'❌ 账号({token_label})：Token 已失效，请重新抓取 X-JLC-AccessToken 更新 Secrets（{e}）'
+                return 'failed', f'❌ 账号({token_label})：Token 已失效，请重新抓取 X-JLC-AccessToken 更新 Secrets（{e}）', []
             except (RequestException, ApiResponseError) as e:
                 print(f"⚠️ [账号{token_label}] 第 {attempt}/{retries} 次请求失败: {e}")
                 if attempt < retries:
@@ -245,11 +496,11 @@ def sign_in(access_token, retries=DEFAULT_RETRIES, backoff=DEFAULT_BACKOFF):
                         time.sleep(wait)
                 else:
                     print(f"❌ [账号{token_label}] 已重试 {retries} 次，放弃")
-                    return 'failed', f'❌ 账号({token_label})：连续 {retries} 次请求失败（{e}）'
+                    return 'failed', f'❌ 账号({token_label})：连续 {retries} 次请求失败（{e}）', []
             except Exception as e:
                 print(f"❌ [账号{token_label}] 未知错误: {e}")
-                return 'failed', f'❌ 账号({token_label})：未知错误（{e}）'
-    return 'failed', f'❌ 账号({token_label})：签到未执行'
+                return 'failed', f'❌ 账号({token_label})：未知错误（{e}）', []
+    return 'failed', f'❌ 账号({token_label})：签到未执行', []
 
 
 # ======== 主函数 ========
@@ -279,12 +530,19 @@ def main():
 
     for send_key, group_tokens in task_groups.items():
         print(f"\n🚀 开始处理 SendKey: {send_key[:5]}... 的 {len(group_tokens)} 个账号")
-        outcomes = {'gained': [], 'already_signed': [], 'failed': []}
+        outcomes = {'gained': [], 'already_signed': [], 'failed': [], 'warnings': []}
 
         for i, token in enumerate(group_tokens):
             print(f"📝 处理第 {i + 1}/{len(group_tokens)} 个账号...")
-            status_kind, message = sign_in(token)
+            res = sign_in(token)
+            if len(res) == 2:
+                status_kind, message = res
+                acct_warnings = []
+            else:
+                status_kind, message, acct_warnings = res
+
             outcomes.setdefault(status_kind, []).append(message)
+            outcomes['warnings'].extend(acct_warnings)
             if status_kind == 'failed':
                 total_failed += 1
 
@@ -297,19 +555,24 @@ def main():
 
     print('\n📬 开始检查是否需要发送通知...')
     notification_sent = False
+    force_notify = NOTIFY_ALWAYS or PREVIEW_COUPONS
 
     for send_key, outcomes in group_outcomes.items():
         gained = outcomes['gained']
         already = outcomes['already_signed']
         failed = outcomes['failed']
+        warnings = outcomes['warnings']
 
         if failed:
             title = '⚠️ 嘉立创签到汇总（含异常）' if gained else '⚠️ 嘉立创自动签到异常'
-            messages = gained + failed + (already if NOTIFY_ALWAYS else [])
+            messages = gained + failed + (already if force_notify else [])
+        elif warnings:
+            title = '⚠️ 嘉立创签到汇总（含第7天告警）'
+            messages = gained + (already if (force_notify or not gained) else [])
         elif gained:
             title = '嘉立创签到汇总'
-            messages = gained + (already if NOTIFY_ALWAYS else [])
-        elif NOTIFY_ALWAYS and already:
+            messages = gained + (already if force_notify else [])
+        elif force_notify and already:
             title = '嘉立创签到状态'
             messages = already
         else:
