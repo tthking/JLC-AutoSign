@@ -58,10 +58,31 @@ class TestBark(unittest.TestCase):
         self.assertEqual(res2['code'], 200)
         self.assertEqual(mock_post.call_args[0][0], 'https://bark.example.com/push')
 
+    @patch('main.time.sleep')
     @patch('main.requests.post')
-    def test_send_msg_by_bark_non_json(self, mock_post):
+    def test_send_msg_by_bark_non_json(self, mock_post, mock_sleep):
         mock_post.return_value = make_response(502, json_data=None, text='Bad Gateway')
         self.assertIsNone(main.send_msg_by_bark('abc123', '标题', '内容'))
+        self.assertEqual(mock_post.call_count, 2)
+        mock_sleep.assert_called_once_with(3)
+
+    @patch('main.time.sleep')
+    @patch('main.requests.post')
+    def test_send_msg_by_bark_retries_and_succeeds(self, mock_post, mock_sleep):
+        mock_post.side_effect = [
+            requests.Timeout('bark timeout'),
+            make_response(200, {'code': 200, 'message': 'success'}),
+        ]
+        res = main.send_msg_by_bark('abc123', '标题', '内容')
+        self.assertEqual(res['code'], 200)
+        self.assertEqual(mock_post.call_count, 2)
+        mock_sleep.assert_called_once_with(3)
+
+    @patch('main.requests.post')
+    def test_send_msg_by_bark_4xx_no_retry(self, mock_post):
+        mock_post.return_value = make_response(400, {'code': 400, 'message': 'bad key'})
+        self.assertIsNone(main.send_msg_by_bark('bad_key', '标题', '内容'))
+        self.assertEqual(mock_post.call_count, 1)
 
 
 class TestSignIn(unittest.TestCase):

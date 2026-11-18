@@ -92,8 +92,8 @@ def parse_config_pairs(token_raw, send_key_raw):
 
 
 # ======== 推送通知 ========
-def send_msg_by_bark(send_key, title, content):
-    """发送 Bark 推送通知，支持自定义完整 URL 或默认 api.day.app Key"""
+def send_msg_by_bark(send_key, title, content, retries=2, backoff=3):
+    """发送 Bark 推送通知（含瞬态网络/5xx 重试），支持自定义完整 URL 或默认 api.day.app Key"""
     key = send_key.strip().rstrip('/')
     if key.startswith('http://') or key.startswith('https://'):
         push_url = key
@@ -104,13 +104,20 @@ def send_msg_by_bark(send_key, title, content):
         'title': title,
         'body': content,
     }
-    try:
-        response = requests.post(push_url, json=data, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        return response.json()
-    except (RequestException, ValueError) as e:
-        print(f"❌ Bark 推送异常: {e}")
-        return None
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.post(push_url, json=data, timeout=REQUEST_TIMEOUT)
+            if 400 <= response.status_code < 500:
+                print(f"❌ Bark 推送被拒绝 (HTTP {response.status_code})，请检查 SEND_KEY_LIST")
+                return None
+            response.raise_for_status()
+            return response.json()
+        except (RequestException, ValueError) as e:
+            print(f"⚠️ Bark 推送第 {attempt}/{retries} 次失败: {e}")
+            if attempt < retries and backoff > 0:
+                time.sleep(backoff * attempt)
+    print("❌ Bark 推送多次重试后仍失败")
+    return None
 
 
 # ======== HTTP 请求辅助 ========

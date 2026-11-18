@@ -2,7 +2,9 @@ name: JLC Auto Sign
 
 on:
   schedule:
-    - cron: '0 0 * * *' # UTC 00:00, corresponding to 8:00 AM Beijing Time
+    # 避开整点拥堵，每日两次执行（北京时间 08:23 主签到 + 16:23 兜底补签）
+    - cron: '23 0 * * *'
+    - cron: '23 8 * * *'
 
   workflow_dispatch:
     inputs:
