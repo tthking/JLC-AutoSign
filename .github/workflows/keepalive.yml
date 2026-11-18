@@ -1,0 +1,31 @@
+name: Keep Workflow Active
+
+on:
+  schedule:
+    # 每月 1 日 UTC 00:05 运行，防止公开仓库因超过 60 天无提交导致定时工作流被 GitHub 自动停用
+    - cron: '5 0 1 * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Keep repository active
+        run: |
+          last_ts=$(git log -1 --format=%ct)
+          now_ts=$(date +%s)
+          diff_days=$(( (now_ts - last_ts) / 86400 ))
+          echo "距离上次提交已过去 ${diff_days} 天"
+          if [ "${diff_days}" -ge 30 ] || [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keep GitHub Actions schedule active"
+            git push
+          else
+            echo "距离上次提交不足 30 天，跳过空提交"
+          fi

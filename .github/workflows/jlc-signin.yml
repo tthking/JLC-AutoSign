@@ -5,17 +5,39 @@ on:
     - cron: '0 0 * * *' # UTC 00:00, corresponding to 8:00 AM Beijing Time
 
   workflow_dispatch:
+    inputs:
+      notify_always:
+        description: '即使今日已签到也推送 Bark 状态通知'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   sign:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Unit Tests
+      run: |
+        python -m unittest -v test_main.py
 
     - name: Run Sign Script
       env:
         TOKEN_LIST: ${{ secrets.TOKEN_LIST }}
         SEND_KEY_LIST: ${{ secrets.SEND_KEY_LIST }}
+        NOTIFY_ALWAYS: ${{ inputs.notify_always || 'false' }}
       run: |
         python main.py
