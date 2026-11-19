@@ -15,6 +15,10 @@
 
 ### 1️⃣ 获取 AccessToken
 
+> 💡 **Mac 一键自动提取并同步（推荐）**：直接双击仓库内的 `一键更新JLC_Token.command`，会自动弹出独立的 Edge 手机视图窗口打开 `https://m.jlc.com`。登录后脚本会自动提取 `X-JLC-AccessToken`、校验有效性、加密写入本仓库 GitHub Secrets 的 `TOKEN_LIST`，并触发一次云端验证。
+
+手动抓包方式（备用）：
+
 > ⚠️ **注意**：当前直接用电脑浏览器打开 `https://m.jlc.com` 会自动 302 跳转到 PC 官网，请务必先切到手机模式。
 
 1. 打开浏览器无痕窗口，按 `F12` 打开开发者工具，并按 `Ctrl+Shift+M`（macOS 为 `Cmd+Option+M`）切换为**手机模拟视图**
