@@ -215,6 +215,7 @@ def capture_token_via_edge(timeout_seconds=300, profile_dir=DEFAULT_PROFILE_DIR)
         EDGE_EXECUTABLE,
         f'--user-data-dir={profile_dir}',
         f'--remote-debugging-port={port}',
+        f'--remote-allow-origins=http://127.0.0.1:{port}',
         '--remote-debugging-address=127.0.0.1',
         '--no-first-run',
         '--no-default-browser-check',
