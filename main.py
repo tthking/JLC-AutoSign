@@ -292,8 +292,13 @@ def _claim_voucher_beans(session, headers, account_label, integral_voucher, reas
             break
 
         if _is_api_success(res):
-            seventh_data = res.get('data') or {}
-            bonus = int(seventh_data.get('gainNum') or 8)
+            seventh_data = res.get('data')
+            if isinstance(seventh_data, dict):
+                bonus = int(seventh_data.get('gainNum') or 8)
+            elif isinstance(seventh_data, (int, float)) and seventh_data > 0:
+                bonus = int(seventh_data)
+            else:
+                bonus = 8
             note_part = f'（{reason_note}）' if reason_note else ''
             print(f"🎉 [账号{account_label}] 第七天签到成功{note_part}，获取 {bonus} 个金豆")
             msg = f'🎉 账号({account_label})：第七天签到成功{note_part}，获取{bonus}个金豆，当前总数：{integral_voucher + bonus}'
@@ -454,7 +459,8 @@ def _sign_in_once(session, access_token):
         print(f"❌ [账号{account_label}] 签到失败 - {message}")
         return finalize('failed', f'❌ 账号({account_label})：签到失败 - {message}')
 
-    data = sign_result.get('data') or {}
+    raw_data = sign_result.get('data')
+    data = raw_data if isinstance(raw_data, dict) else {}
     gain_num = data.get('gainNum')
     status = data.get('status')
 

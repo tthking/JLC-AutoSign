@@ -199,6 +199,27 @@ class TestSignIn(unittest.TestCase):
         self.assertIn('当前总数：208', msg)
 
     @patch('main.requests.Session')
+    def test_seventh_day_voucher_returns_scalar_int_succeeds(self, mock_session_cls):
+        """测试 receiveVoucher 接口返回 data 为标量数字（如 8）时不会报 'int' object has no attribute 'get'"""
+        session = mock_session_cls.return_value.__enter__.return_value
+        coupon_list = [
+            make_coupon_item(102, '15元纸盒包装券', 'BOX', can_exchange=False),
+            make_coupon_item(101, '10元FPC优惠券', 'FPC', can_exchange=False),
+        ]
+        session.get.side_effect = [
+            self._assets_ok(200),
+            self._config_not_signed(),
+            make_response(200, {'code': 200, 'success': True, 'data': {'status': 1, 'gainNum': 0}}),
+            make_response(200, {'code': 200, 'success': True, 'data': coupon_list}),
+            make_response(200, {'code': 200, 'success': True, 'data': 8}),
+        ]
+        kind, msg, warnings = main.sign_in('valid_token', retries=1, backoff=0)
+        self.assertEqual(kind, 'gained')
+        self.assertEqual(warnings, [])
+        self.assertIn('获取8个金豆', msg)
+        self.assertIn('当前总数：208', msg)
+
+    @patch('main.requests.Session')
     def test_seventh_day_unmatched_coupon_names_emits_warning_and_falls_back(self, mock_session_cls):
         session = mock_session_cls.return_value.__enter__.return_value
         coupon_list = [
